@@ -27,3 +27,189 @@ input,textarea,button{font:inherit;color:var(--tx);background:var(--sf);border:1
 textarea{min-height:64px;resize:vertical}
 button{background:var(--ac);border:0;color:#fff;font-weight:600}
 button:focus-visible,input:focus-visible,textarea:focus-visible,li:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+#msg{padding:0 16px;color:var(--mu);font-size:14px;min-height:20px}
+#msg.err{color:var(--er)}
+ul{list-style:none;margin:0;padding:0 8px 24px}
+li{padding:12px 8px;border-bottom:1px solid #232937;cursor:pointer}
+li small{display:block;color:var(--mu)}
+li.on{background:var(--sf);border-radius:8px}
+</style>
+</head>
+<body>
+<header><h1>IPTV Oynatıcı</h1></header>
+<div id="grid"></div>
+<div id="msg">Bir M3U liste bağlantısı yapıştır ya da liste metnini gir.</div>
+<div class="bar">
+  <select id="lay" aria-label="Ekran sayısı"></select>
+  <input id="url" type="url" placeholder="M3U liste bağlantısı (https://...)">
+  <textarea id="txt" placeholder="veya M3U içeriğini buraya yapıştır"></textarea>
+  <button id="load">Listeyi yükle</button>
+  <input id="q" type="search" placeholder="Kanal ara">
+  <select id="back" disabled><option>Geriye dönük: kanal seç</option></select>
+  <button id="bk" disabled>Geriden izle</button>
+</div>
+<ul id="list"></ul>
+<div id="sheet" hidden></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+let channels=[],tiles=[],active=0;
+
+function say(t,err){$("msg").textContent=t;$("msg").className=err?"err":""}
+
+function parse(text){
+  const out=[],lines=text.split(/\r?\n/);
+  let name="",group="",cu=null;
+  for(const l of lines){
+    const s=l.trim();
+    if(s.startsWith("#EXTINF")){
+      name=s.split(",").slice(1).join(",").trim();
+      const at=k=>{const m=s.match(new RegExp(k+'="([^"]*)"'));return m?m[1]:""};
+      group=at("group-title");
+      cu=at("catchup")||at("catchup-source")?{type:at("catchup"),days:parseInt(at("catchup-days"))||1,src:at("catchup-source")}:null;
+    }else if(s&&!s.startsWith("#")){
+      out.push({name:name||s,group,url:s,cu});
+      name="";group="";cu=null;
+    }
+  }
+  return out;
+}
+
+function render(){
+  const q=$("q").value.toLowerCase();
+  const ul=$("list");ul.innerHTML="";
+  channels.filter(c=>c.name.toLowerCase().includes(q)).slice(0,300).forEach(c=>{
+    const li=document.createElement("li");
+    li.tabIndex=0;
+    li.textContent=c.name;
+    if(c.group){const s=document.createElement("small");s.textContent=c.group;li.appendChild(s)}
+    const go=()=>{
+      document.querySelectorAll("li.on").forEach(e=>e.classList.remove("on"));
+      li.classList.add("on");setupBack(c);
+      if(tiles.length===1)play(c);else askScreen(c);
+    };
+    li.onclick=go;
+    li.onkeydown=e=>{if(e.key==="Enter")go()};
+    ul.appendChild(li);
+  });
+}
+
+function setLayout(n){
+  tiles.forEach(t=>{if(t.hls)t.hls.destroy()});
+  const g=$("grid");g.innerHTML="";tiles=[];
+  const wide=window.innerWidth>700;
+  const cols=n===1?1:n<=2?(wide?2:1):n<=4?2:n<=6?(wide?3:2):(wide?4:2);
+  g.style.gridTemplateColumns="repeat("+cols+",1fr)";
+  for(let i=0;i<n;i++){
+    const d=document.createElement("div");d.className="tile";
+    const v=document.createElement("video");
+    v.playsInline=true;v.controls=n===1;v.muted=true;
+    const l=document.createElement("span");l.textContent="Ekran "+(i+1);
+    d.append(v,l);
+    d.onclick=()=>pick(i);
+    g.appendChild(d);
+    tiles.push({d,v,l,hls:null});
+  }
+  pick(0);
+  try{localStorage.setItem("iptv-lay",n)}catch(e){}
+}
+function pick(i){
+  active=i;
+  tiles.forEach((t,j)=>{t.d.classList.toggle("act",j===i);t.v.muted=j!==i});
+  if(tiles.length>1)say("Ekran "+(i+1)+" seçili. Listeden bir kanal seç.");
+}
+function askScreen(c){
+  const sh=$("sheet");sh.innerHTML="";
+  const box=document.createElement("div");
+  const p=document.createElement("p");p.textContent=c.name+" hangi ekranda açılsın?";
+  box.appendChild(p);
+  tiles.forEach((t,i)=>{
+    const b=document.createElement("button");
+    b.textContent="Ekran "+(i+1);
+    const sm=document.createElement("small");
+    sm.textContent=t.hls||t.v.src?t.l.textContent:"Boş";
+    b.appendChild(sm);
+    b.onclick=()=>{sh.hidden=true;pick(i);play(c)};
+    box.appendChild(b);
+  });
+  const x=document.createElement("button");x.className="no";x.textContent="Vazgeç";
+  x.onclick=()=>{sh.hidden=true};
+  box.appendChild(x);sh.appendChild(box);sh.hidden=false;
+}
+function play(c){
+  const t=tiles[active],v=t.v;
+  if(t.hls){t.hls.destroy();t.hls=null}
+  t.l.textContent=c.name;
+  say(c.name+" açılıyor (ekran "+(active+1)+")...");
+  if(window.Hls&&Hls.isSupported()&&/\.m3u8/i.test(c.url)){
+    const h=new Hls();t.hls=h;
+    h.loadSource(c.url);
+    h.attachMedia(v);
+    h.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)say("Bu kanal açılamadı. Adres http ise ya da site izin vermiyorsa tarayıcı engeller.",true)});
+  }else{
+    v.src=c.url;
+  }
+  v.play().then(()=>say(c.name)).catch(()=>{});
+}
+
+let cur=null;
+function setupBack(c){
+  cur=c;const b=$("back"),k=$("bk");
+  b.innerHTML="";
+  if(!c.cu){
+    b.innerHTML="<option>Bu kanalda geriye dönük yayın yok</option>";
+    b.disabled=k.disabled=true;return;
+  }
+  const max=Math.min(24,c.cu.days*24);
+  for(let h=1;h<=max;h++){
+    if(h>6&&h%3)continue;
+    const o=document.createElement("option");
+    o.value=h;o.textContent=h+" saat önce";b.appendChild(o);
+  }
+  b.disabled=k.disabled=false;
+}
+function catchupUrl(c,h){
+  const now=Math.floor(Date.now()/1000),st=now-h*3600;
+  const rep=t=>t.replace(/\$?\{(utc|start|timestamp)\}/g,st).replace(/\$?\{(utcend|end|lutc)\}/g,now).replace(/\$?\{duration\}/g,h*3600).replace(/\$?\{offset\}/g,h*3600);
+  const t=c.cu.type;
+  if(t==="append")return c.url+rep(c.cu.src);
+  if(t==="shift")return c.url+(c.url.includes("?")?"&":"?")+"utc="+st+"&lutc="+now;
+  return rep(c.cu.src||c.url);
+}
+$("bk").onclick=()=>{
+  if(!cur||!cur.cu)return;
+  const h=+$("back").value;
+  play({name:cur.name+" ("+h+" saat önce)",url:catchupUrl(cur,h)});
+};
+
+async function load(){
+  let text=$("txt").value.trim();
+  const url=$("url").value.trim();
+  try{
+    if(!text&&url){
+      say("Liste indiriliyor...");
+      const r=await fetch(url);
+      text=await r.text();
+      try{localStorage.setItem("iptv-url",url)}catch(e){}
+    }
+    if(!text){say("Önce bir bağlantı ya da liste gir.",true);return}
+    channels=parse(text);
+    if(!channels.length){say("Listede kanal bulunamadı. Geçerli bir M3U olduğundan emin ol.",true);return}
+    say(channels.length+" kanal yüklendi.");
+    render();
+  }catch(e){
+    say("Liste indirilemedi. Site tarayıcı erişimine izin vermiyor olabilir; listeyi metin olarak yapıştırmayı dene.",true);
+  }
+}
+
+const lay=$("lay");
+for(let i=1;i<=8;i++){const o=document.createElement("option");o.value=i;o.textContent=i+" ekran";lay.appendChild(o)}
+lay.onchange=()=>setLayout(+lay.value);
+let n0=1;try{n0=+localStorage.getItem("iptv-lay")||1}catch(e){}
+lay.value=n0;setLayout(n0);
+$("load").onclick=load;
+$("q").oninput=render;
+try{const u=localStorage.getItem("iptv-url");if(u)$("url").value=u}catch(e){}
+</script>
+</body>
+</html>
